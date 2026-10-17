@@ -1,0 +1,2103 @@
+From d12ff95636ff23d501da56a3019cb59815913578 Mon Sep 17 00:00:00 2001
+From: Magra Ku <243417575+magraku@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 13:01:00 +0000
+Subject: [PATCH 1/2] =?UTF-8?q?Add=20=C3=A9tag=C3=A8re=20landing,=20multi-?=
+ =?UTF-8?q?marketplace=20search=20and=20seller=20inventory=20pages?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Public pages built around a shelf of cardboard boxes (one per marketplace or
+per corner of the seller's home), with Poulpe the octopus as mascot:
+- / : hero stack of 8 marketplace boxes, buyer/seller entry points, screenpipe pitch
+- /chercher : text or photo search with colour/material/condition/budget filters,
+  boxes open one by one as results come in, screenpipe 'seen on screen' memories
+- /inventaire : seller stock boxes that open to list items, repeated tasks
+  detected by screenpipe with one-click automations
+
+Data is demo data (src/lib/demo-data.ts); screenpipe is read locally from
+localhost:3030 with a demo fallback.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MQ5xVVhbmehyRbhYYH4Zpu
+---
+ src/app/chercher/page.tsx           | 463 ++++++++++++++++++++++++++++
+ src/app/etagere.css                 | 365 ++++++++++++++++++++++
+ src/app/inventaire/page.tsx         | 272 ++++++++++++++++
+ src/app/layout.tsx                  |  24 +-
+ src/app/page.tsx                    | 203 ++++++++++--
+ src/components/etagere/crate.tsx    |  78 +++++
+ src/components/etagere/octopus.tsx  |  68 ++++
+ src/components/etagere/site-nav.tsx |  47 +++
+ src/lib/demo-data.ts                | 224 ++++++++++++++
+ src/lib/screenpipe.ts               |  65 ++++
+ src/middleware.ts                   |   7 +-
+ 11 files changed, 1776 insertions(+), 40 deletions(-)
+ create mode 100644 src/app/chercher/page.tsx
+ create mode 100644 src/app/etagere.css
+ create mode 100644 src/app/inventaire/page.tsx
+ create mode 100644 src/components/etagere/crate.tsx
+ create mode 100644 src/components/etagere/octopus.tsx
+ create mode 100644 src/components/etagere/site-nav.tsx
+ create mode 100644 src/lib/demo-data.ts
+ create mode 100644 src/lib/screenpipe.ts
+
+diff --git a/src/app/chercher/page.tsx b/src/app/chercher/page.tsx
+new file mode 100644
+index 0000000..9cec20d
+--- /dev/null
++++ b/src/app/chercher/page.tsx
+@@ -0,0 +1,463 @@
++"use client"
++
++import { AnimatePresence, motion } from "framer-motion"
++import { Armchair, Bell, Camera, Footprints, Search, Shirt, ShoppingBag, Watch, X } from "lucide-react"
++import { Suspense, useEffect, useMemo, useRef, useState } from "react"
++import { useSearchParams } from "next/navigation"
++import { toast } from "sonner"
++import { cn } from "@/components/ui"
++import { Crate } from "@/components/etagere/crate"
++import { Octopus } from "@/components/etagere/octopus"
++import { SiteNav } from "@/components/etagere/site-nav"
++import {
++  COLORS,
++  CONDITIONS,
++  MARKETPLACES,
++  MATERIALS,
++  marketplaceName,
++  searchOffers,
++  type Category,
++  type Condition,
++  type MarketplaceId,
++  type Offer,
++  type ScreenMemory,
++} from "@/lib/demo-data"
++import { loadScreenMemories } from "@/lib/screenpipe"
++
++const SEARCH_URL: Record<MarketplaceId, (q: string) => string> = {
++  vinted: (q) => `https://www.vinted.fr/catalog?search_text=${q}`,
++  leboncoin: (q) => `https://www.leboncoin.fr/recherche?text=${q}`,
++  vestiaire: (q) => `https://fr.vestiairecollective.com/search/?q=${q}`,
++  zalando: (q) => `https://www.zalando.fr/catalogue/?q=${q}`,
++  farfetch: (q) => `https://www.farfetch.com/fr/shopping/search/items.aspx?q=${q}`,
++  amazon: (q) => `https://www.amazon.fr/s?k=${q}`,
++  ebay: (q) => `https://www.ebay.fr/sch/i.html?_nkw=${q}`,
++  depop: (q) => `https://www.depop.com/search/?q=${q}`,
++}
++
++const CATEGORY_ICON: Record<Category, typeof Shirt> = {
++  chaussures: Footprints,
++  sacs: ShoppingBag,
++  vestes: Shirt,
++  montres: Watch,
++  deco: Armchair,
++}
++
++const SWATCH: Record<string, string> = {
++  noir: "#2b2120",
++  nude: "#e3c3a8",
++  rouge: "#a8322d",
++  bleu: "#5d7f9f",
++  marron: "#7a5236",
++  beige: "#d9c4a0",
++}
++
++const BUDGETS = [100, 300, 500, 1000]
++
++// Disposition de l'étagère : 2 rangées de 4 boîtes.
++const SLOT_W = 172
++const ROW_H = 168
++
++function Toggle({ on, onClick, children }: { on: boolean; onClick: () => void; children: React.ReactNode }) {
++  return (
++    <button type="button" className="sf-chip" data-on={on} onClick={onClick} aria-pressed={on}>
++      {children}
++    </button>
++  )
++}
++
++function OfferCard({ offer, query }: { offer: Offer; query: string }) {
++  const Icon = CATEGORY_ICON[offer.category]
++  const off = offer.retailPrice && offer.retailPrice > offer.price ? Math.round((1 - offer.price / offer.retailPrice) * 100) : 0
++  return (
++    <motion.li
++      layout
++      initial={{ opacity: 0, y: 24, rotate: -1.5 }}
++      animate={{ opacity: 1, y: 0, rotate: 0 }}
++      exit={{ opacity: 0, scale: 0.95 }}
++      transition={{ type: "spring", stiffness: 300, damping: 26 }}
++      className="flex flex-col overflow-hidden rounded-[1.4rem] bg-[var(--paper)] shadow-[0_1px_0_rgba(67,48,46,0.08),0_20px_40px_-28px_rgba(67,48,46,0.55)]"
++    >
++      <div className="relative flex h-40 items-center justify-center" style={{ background: `${SWATCH[offer.color] ?? "#c9b79c"}22` }}>
++        <Icon className="h-14 w-14 opacity-70" strokeWidth={1.2} style={{ color: SWATCH[offer.color] ?? "var(--ink)" }} />
++        <span className="absolute left-3 top-3 rounded-full bg-[var(--paper)] px-3 py-1 text-[0.78rem] font-semibold">
++          {marketplaceName(offer.marketplace)}
++        </span>
++        <span
++          className={cn(
++            "absolute right-3 top-3 rounded-full px-3 py-1 text-[0.78rem]",
++            offer.condition === "neuf" && "bg-[var(--sky)]",
++            offer.condition === "avec défaut" && "bg-[#f3d6c8]",
++            offer.condition !== "neuf" && offer.condition !== "avec défaut" && "bg-[var(--butter)]"
++          )}
++        >
++          {offer.condition}
++        </span>
++      </div>
++      <div className="flex flex-1 flex-col gap-2 p-5">
++        <p className="font-semibold leading-snug">{offer.title}</p>
++        <p className="text-[0.85rem] text-[var(--ink-soft)]">
++          {offer.material}, {offer.color}
++          {offer.size ? `, taille ${offer.size}` : ""}
++          {offer.postedDaysAgo === 0 ? ", publié aujourd'hui" : `, publié il y a ${offer.postedDaysAgo} j`}
++        </p>
++        {offer.note ? <p className="text-[0.85rem] italic text-[var(--ink-soft)]">{offer.note}</p> : null}
++        <div className="mt-auto flex items-end justify-between gap-3 pt-3">
++          <p>
++            <span className="serif text-[1.7rem] leading-none">{offer.price} €</span>
++            {off > 0 ? <span className="ml-2 text-[0.85rem] text-[var(--ink-soft)]">−{off} % vs neuf</span> : null}
++          </p>
++          <a
++            href={SEARCH_URL[offer.marketplace](encodeURIComponent(query || offer.title))}
++            target="_blank"
++            rel="noreferrer"
++            className="text-[0.85rem] font-semibold underline decoration-[1.5px] underline-offset-4"
++          >
++            Voir sur {marketplaceName(offer.marketplace)}
++          </a>
++        </div>
++      </div>
++    </motion.li>
++  )
++}
++
++function ChercherInner() {
++  const params = useSearchParams()
++  const [query, setQuery] = useState("")
++  const [submitted, setSubmitted] = useState("")
++  const [photo, setPhoto] = useState<string | null>(null)
++  const [colors, setColors] = useState<string[]>([])
++  const [materials, setMaterials] = useState<string[]>([])
++  const [conditions, setConditions] = useState<Condition[]>([])
++  const [maxPrice, setMaxPrice] = useState<number | undefined>()
++  const [sort, setSort] = useState<"prix" | "recent">("prix")
++  const [phase, setPhase] = useState<"idle" | "searching" | "done">("idle")
++  const [visiting, setVisiting] = useState(-1)
++  const [visited, setVisited] = useState<number[]>([])
++  const [memories, setMemories] = useState<ScreenMemory[]>([])
++  const [live, setLive] = useState<boolean | null>(null)
++  const [alertOn, setAlertOn] = useState(false)
++  const fileRef = useRef<HTMLInputElement>(null)
++  const timers = useRef<ReturnType<typeof setTimeout>[]>([])
++
++  const toggle = <T,>(list: T[], v: T, set: (x: T[]) => void) => set(list.includes(v) ? list.filter((x) => x !== v) : [...list, v])
++
++  const results = useMemo(() => {
++    if (!submitted) return []
++    const r = searchOffers(submitted, { colors, materials, conditions, maxPrice })
++    return sort === "prix" ? r : [...r].sort((a, b) => a.postedDaysAgo - b.postedDaysAgo)
++  }, [submitted, colors, materials, conditions, maxPrice, sort])
++
++  const countBy = useMemo(() => {
++    const c: Partial<Record<MarketplaceId, number>> = {}
++    for (const r of results) c[r.marketplace] = (c[r.marketplace] ?? 0) + 1
++    return c
++  }, [results])
++
++  useEffect(() => {
++    loadScreenMemories().then((r) => {
++      setLive(r.live)
++      setMemories(r.memories)
++    })
++  }, [])
++
++  function run(q: string) {
++    const clean = q.trim()
++    if (!clean) return
++    setQuery(clean)
++    setSubmitted(clean)
++    setPhase("searching")
++    setVisited([])
++    timers.current.forEach(clearTimeout)
++    timers.current.length = 0
++    timers.current.push(
++      ...MARKETPLACES.map((_, i) =>
++        setTimeout(() => {
++          setVisiting(i)
++          setVisited((v) => [...v, i])
++        }, 250 + i * 330)
++      )
++    )
++    timers.current.push(
++      setTimeout(() => {
++        setVisiting(-1)
++        setPhase("done")
++        document.getElementById("resultats")?.scrollIntoView({ behavior: "smooth", block: "start" })
++      }, 250 + MARKETPLACES.length * 330 + 350)
++    )
++  }
++
++  useEffect(() => {
++    const q = params.get("q")
++    const pending = timers.current
++    const start = q ? setTimeout(() => run(q), 0) : undefined
++    return () => {
++      clearTimeout(start)
++      pending.forEach(clearTimeout)
++    }
++  }, [params])
++
++  function onPhoto(e: React.ChangeEvent<HTMLInputElement>) {
++    const f = e.target.files?.[0]
++    if (!f) return
++    setPhoto(URL.createObjectURL(f))
++    // Démo : la reconnaissance du modèle sera faite par le backend (modèle vision).
++    toast("Photo analysée (démo) : Louboutin So Kate")
++    run("Louboutin So Kate")
++  }
++
++  const cheapest = results.length ? results.reduce((a, b) => (a.price <= b.price ? a : b)) : null
++  const retail = results.find((r) => r.retailPrice)?.retailPrice
++
++  const octoPos = (i: number) => ({ x: (i % 4) * SLOT_W - 40, y: Math.floor(i / 4) * ROW_H - 70 })
++  const octo = visiting >= 0 ? octoPos(visiting) : { x: 4 * SLOT_W - 30, y: ROW_H - 70 }
++
++  return (
++    <div className="sf bg-[var(--sky-soft)]">
++      <SiteNav tone="sky" />
++
++      <section className="relative overflow-hidden bg-[var(--sky)]">
++        <div className="grain" />
++        <div className="relative mx-auto max-w-[1240px] px-4 pb-10 pt-4 sm:px-8 lg:pb-14">
++          <h1 className="serif text-[clamp(2.2rem,5vw,3.8rem)] leading-[1.05]">Qu&apos;est-ce qu&apos;on cherche ?</h1>
++          <form
++            className="sf-field mt-7 flex items-center gap-2 py-2 pl-5 pr-2"
++            onSubmit={(e) => {
++              e.preventDefault()
++              run(query)
++            }}
++          >
++            <Search className="h-5 w-5 shrink-0 opacity-60" aria-hidden />
++            {photo ? (
++              <span className="relative shrink-0">
++                {/* eslint-disable-next-line @next/next/no-img-element */}
++                <img src={photo} alt="Photo envoyée" className="h-9 w-9 rounded-lg object-cover" />
++                <button
++                  type="button"
++                  onClick={() => setPhoto(null)}
++                  className="absolute -right-1.5 -top-1.5 rounded-full bg-[var(--ink)] p-0.5 text-[var(--butter)]"
++                  aria-label="Retirer la photo"
++                >
++                  <X className="h-3 w-3" />
++                </button>
++              </span>
++            ) : null}
++            <input
++              value={query}
++              onChange={(e) => setQuery(e.target.value)}
++              placeholder="Un modèle, une marque : Louboutin So Kate, trench Burberry…"
++              className="min-w-0 flex-1 bg-transparent py-2 text-[1.05rem] outline-none placeholder:text-[var(--ink-soft)]/60"
++              aria-label="Article recherché"
++            />
++            <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={onPhoto} />
++            <button
++              type="button"
++              onClick={() => fileRef.current?.click()}
++              className="rounded-full p-2.5 hover:bg-[rgba(67,48,46,0.06)]"
++              aria-label="Chercher avec une photo"
++              title="Chercher avec une photo"
++            >
++              <Camera className="h-5 w-5" />
++            </button>
++            <button type="submit" className="sf-btn sf-btn-ink !py-2.5">
++              <span className="hidden sm:inline">Chercher partout</span>
++              <span className="sm:hidden">Chercher</span>
++            </button>
++          </form>
++
++          <div className="mt-5 flex flex-col gap-3 text-[0.9rem]">
++            <div className="flex flex-wrap items-center gap-2">
++              <span className="w-20 text-[var(--ink-soft)]">Couleur</span>
++              {COLORS.map((c) => (
++                <Toggle key={c} on={colors.includes(c)} onClick={() => toggle(colors, c, setColors)}>
++                  <span className="h-3 w-3 rounded-full border border-black/10" style={{ background: SWATCH[c] }} />
++                  {c}
++                </Toggle>
++              ))}
++            </div>
++            <div className="flex flex-wrap items-center gap-2">
++              <span className="w-20 text-[var(--ink-soft)]">Matière</span>
++              {MATERIALS.map((m) => (
++                <Toggle key={m} on={materials.includes(m)} onClick={() => toggle(materials, m, setMaterials)}>
++                  {m}
++                </Toggle>
++              ))}
++            </div>
++            <div className="flex flex-wrap items-center gap-2">
++              <span className="w-20 text-[var(--ink-soft)]">État</span>
++              {CONDITIONS.map((c) => (
++                <Toggle key={c} on={conditions.includes(c)} onClick={() => toggle(conditions, c, setConditions)}>
++                  {c}
++                </Toggle>
++              ))}
++            </div>
++            <div className="flex flex-wrap items-center gap-2">
++              <span className="w-20 text-[var(--ink-soft)]">Budget</span>
++              {BUDGETS.map((b) => (
++                <Toggle key={b} on={maxPrice === b} onClick={() => setMaxPrice(maxPrice === b ? undefined : b)}>
++                  jusqu&apos;à {b} €
++                </Toggle>
++              ))}
++            </div>
++          </div>
++        </div>
++      </section>
++
++      <section className="mx-auto max-w-[1240px] px-4 pt-10 sm:px-8">
++        <div className="flex flex-wrap items-baseline justify-between gap-2">
++          <h2 className="serif text-[1.5rem]">Vu sur votre écran</h2>
++          {live === null ? null : (
++            <p className="flex items-center gap-2 text-[0.85rem] text-[var(--ink-soft)]">
++              <span className={cn("status-dot", live ? "live text-emerald-600 bg-emerald-600" : "bg-[var(--ink-soft)]")} />
++              {live ? "screenpipe connecté sur cet ordinateur" : "Exemples : screenpipe n'est pas lancé sur cet ordinateur"}
++            </p>
++          )}
++        </div>
++        <div className="hide-scrollbar -mx-4 mt-4 flex gap-3 overflow-x-auto px-4 pb-2 sm:mx-0 sm:px-0">
++          {live && memories.length === 0 ? (
++            <p className="text-[0.92rem] text-[var(--ink-soft)]">Aucun article repéré à l&apos;écran cette semaine.</p>
++          ) : null}
++          {memories.map((m) => (
++            <button
++              key={m.id}
++              type="button"
++              onClick={() => run(m.query)}
++              className="w-[250px] shrink-0 rounded-2xl bg-[var(--paper)] p-4 text-left transition-transform duration-300 hover:-translate-y-0.5"
++            >
++              <p className="text-[0.8rem] text-[var(--ink-soft)]">
++                {m.seenOn}, {m.when}
++              </p>
++              <p className="serif mt-1 text-[1.1rem] leading-tight">{m.query}</p>
++              <p className="mt-1 line-clamp-2 text-[0.85rem] text-[var(--ink-soft)]">{m.excerpt}</p>
++            </button>
++          ))}
++        </div>
++      </section>
++
++      <section className="mx-auto max-w-[1240px] px-4 pt-12 sm:px-8" aria-label="Étagère des boutiques">
++        <div className="flex flex-wrap items-baseline justify-between gap-2">
++          <h2 className="serif text-[1.5rem]">L&apos;étagère des boutiques</h2>
++          <p className="text-[0.9rem] text-[var(--ink-soft)]" aria-live="polite">
++            {phase === "idle" && "Lancez une recherche : Poulpe ouvre chaque boîte."}
++            {phase === "searching" && visiting >= 0 && `Poulpe fouille ${MARKETPLACES[visiting].name}…`}
++            {phase === "done" && `${results.length} offre${results.length > 1 ? "s" : ""} trouvée${results.length > 1 ? "s" : ""} dans ${Object.keys(countBy).length} boîtes`}
++          </p>
++        </div>
++        <div className="mt-6 overflow-hidden">
++          <div className="mx-auto w-[720px] origin-top-left scale-[0.48] -mb-[220px] min-[480px]:scale-[0.62] min-[480px]:-mb-[160px] sm:scale-[0.85] sm:-mb-[60px] md:scale-100 md:mb-0">
++            <div className="relative pt-24">
++              <motion.div
++                className="absolute left-0 top-0 z-30"
++                animate={{ x: octo.x, y: octo.y + 96 }}
++                transition={{ type: "spring", stiffness: 140, damping: 16 }}
++              >
++                <Octopus size={110} wave={phase === "done"} />
++              </motion.div>
++              {[0, 1].map((row) => (
++                <div key={row} className="relative" style={{ height: ROW_H }}>
++                  <div className="absolute inset-x-0 bottom-[44px] flex">
++                    {MARKETPLACES.slice(row * 4, row * 4 + 4).map((m, j) => {
++                      const i = row * 4 + j
++                      const isOpen = visited.includes(i) && phase !== "idle"
++                      const count = countBy[m.id] ?? 0
++                      return (
++                        <div key={m.id} className="relative flex justify-center" style={{ width: SLOT_W }}>
++                          <Crate
++                            width={140}
++                            height={100}
++                            depth={92}
++                            open={isOpen}
++                            label={
++                              <>
++                                <span className={cn("serif block truncate", m.name.length > 11 ? "text-[0.72rem]" : "text-[0.88rem]")}>{m.name}</span>
++                                <span className="block truncate text-[0.64rem] text-[var(--ink-soft)]">{m.kind}</span>
++                              </>
++                            }
++                            contents={
++                              <span
++                                className={cn(
++                                  "block whitespace-nowrap rounded-full px-3 py-1 text-[0.8rem] font-semibold shadow-md",
++                                  count ? "bg-[var(--ink)] text-[var(--butter)]" : "bg-[var(--paper)] text-[var(--ink-soft)]"
++                                )}
++                              >
++                                {count ? `${count} trouvé${count > 1 ? "s" : ""}` : "rien ici"}
++                              </span>
++                            }
++                          />
++                        </div>
++                      )
++                    })}
++                  </div>
++                  <div className="shelf-plank absolute inset-x-0 bottom-4" />
++                </div>
++              ))}
++            </div>
++          </div>
++        </div>
++      </section>
++
++      <section id="resultats" className="mx-auto max-w-[1240px] scroll-mt-6 px-4 pb-24 pt-10 sm:px-8">
++        <AnimatePresence>
++          {phase === "done" ? (
++            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
++              <div className="flex flex-col justify-between gap-5 rounded-[1.6rem] bg-[var(--butter)] p-6 sm:flex-row sm:items-center sm:p-8">
++                <div>
++                  <h2 className="serif text-[clamp(1.6rem,3vw,2.2rem)] leading-tight">
++                    {results.length ? `${results.length} offres pour « ${submitted} »` : `Rien pour « ${submitted} » avec ces filtres`}
++                  </h2>
++                  {cheapest ? (
++                    <p className="mt-2 text-[var(--ink-soft)]">
++                      Le moins cher : {cheapest.price} € sur {marketplaceName(cheapest.marketplace)}, {cheapest.condition}.
++                      {retail ? ` Prix neuf : ${retail} €.` : ""}
++                    </p>
++                  ) : (
++                    <p className="mt-2 text-[var(--ink-soft)]">Retirez un filtre ou augmentez le budget pour ouvrir plus de boîtes.</p>
++                  )}
++                </div>
++                {results.length ? (
++                  <div className="flex shrink-0 flex-wrap gap-2">
++                    <Toggle on={sort === "prix"} onClick={() => setSort("prix")}>
++                      Prix croissant
++                    </Toggle>
++                    <Toggle on={sort === "recent"} onClick={() => setSort("recent")}>
++                      Plus récents
++                    </Toggle>
++                    <button
++                      type="button"
++                      className={cn("sf-chip", alertOn && "!bg-[var(--ink)] !text-[var(--butter)]")}
++                      onClick={() => {
++                        setAlertOn(!alertOn)
++                        if (!alertOn && cheapest) toast(`Alerte créée : « ${submitted} » sous ${cheapest.price} €`)
++                      }}
++                    >
++                      <Bell className="h-4 w-4" />
++                      {alertOn ? "Alerte activée" : "Créer une alerte prix"}
++                    </button>
++                  </div>
++                ) : null}
++              </div>
++              <ul className="mt-8 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
++                <AnimatePresence mode="popLayout">
++                  {results.map((r) => (
++                    <OfferCard key={r.id} offer={r} query={submitted} />
++                  ))}
++                </AnimatePresence>
++              </ul>
++              <p className="mt-8 text-[0.85rem] text-[var(--ink-soft)]">
++                Offres d&apos;exemple pour la démo. Les liens ouvrent la vraie recherche sur chaque site.
++              </p>
++            </motion.div>
++          ) : null}
++        </AnimatePresence>
++      </section>
++    </div>
++  )
++}
++
++export default function ChercherPage() {
++  return (
++    <Suspense>
++      <ChercherInner />
++    </Suspense>
++  )
++}
+diff --git a/src/app/etagere.css b/src/app/etagere.css
+new file mode 100644
+index 0000000..897db08
+--- /dev/null
++++ b/src/app/etagere.css
+@@ -0,0 +1,365 @@
++/* Stockflow "étagère" — public pages (accueil, chercher, inventaire). */
++
++.sf {
++  --ink: #43302e;
++  --ink-soft: #6b5552;
++  --butter: #fff1b5;
++  --butter-soft: #fff8dc;
++  --sky: #c1dbe8;
++  --sky-soft: #e4eff5;
++  --paper: #fffdf6;
++  --kraft: #d4b083;
++  --kraft-light: #e6cda4;
++  --kraft-dark: #b48b5c;
++  --kraft-shadow: #9a734a;
++  --oak: #8a6646;
++  --oak-light: #a9825d;
++  --tape: rgba(196, 160, 110, 0.55);
++
++  font-family: var(--font-instrument), ui-sans-serif, system-ui, sans-serif;
++  color: var(--ink);
++  letter-spacing: -0.005em;
++  font-variant-numeric: normal;
++  min-height: 100dvh;
++}
++
++.sf .serif {
++  font-family: var(--font-young-serif), Georgia, serif;
++  font-weight: 400;
++  letter-spacing: -0.02em;
++}
++
++.sf a:focus-visible,
++.sf button:focus-visible,
++.sf input:focus-visible,
++.sf select:focus-visible,
++.sf [role="button"]:focus-visible {
++  outline: 2px solid var(--ink);
++  outline-offset: 3px;
++  border-radius: 6px;
++}
++
++/* ---------- Carton (3D CSS box) ---------- */
++
++.crate-scene {
++  perspective: 900px;
++  perspective-origin: 50% -40%;
++}
++
++.crate {
++  --w: 150px;
++  --h: 110px;
++  --d: 110px;
++  position: relative;
++  width: var(--w);
++  height: var(--h);
++  transform-style: preserve-3d;
++  transform: rotateX(-14deg) rotateY(-28deg);
++  transition: transform 0.6s cubic-bezier(0.34, 1.4, 0.5, 1);
++}
++
++.crate-face {
++  position: absolute;
++  backface-visibility: hidden;
++  background-color: var(--kraft);
++  background-image:
++    linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(0, 0, 0, 0.05)),
++    repeating-linear-gradient(90deg, rgba(120, 80, 40, 0.035) 0 2px, transparent 2px 7px);
++  box-shadow: inset 0 0 0 1px rgba(110, 75, 40, 0.18);
++}
++
++.crate-front {
++  width: var(--w);
++  height: var(--h);
++  transform: translateZ(calc(var(--d) / 2));
++}
++.crate-back {
++  width: var(--w);
++  height: var(--h);
++  transform: rotateY(180deg) translateZ(calc(var(--d) / 2));
++  background-color: var(--kraft-dark);
++}
++.crate-right {
++  width: var(--d);
++  height: var(--h);
++  left: calc((var(--w) - var(--d)) / 2);
++  transform: rotateY(90deg) translateZ(calc(var(--w) / 2));
++  background-color: var(--kraft-dark);
++}
++.crate-left {
++  width: var(--d);
++  height: var(--h);
++  left: calc((var(--w) - var(--d)) / 2);
++  transform: rotateY(-90deg) translateZ(calc(var(--w) / 2));
++  background-color: var(--kraft-light);
++}
++
++/* Interior seen when the flaps open */
++.crate-hole {
++  position: absolute;
++  width: var(--w);
++  height: var(--d);
++  top: calc((var(--h) - var(--d)) / 2);
++  transform: rotateX(90deg) translateZ(calc(var(--h) / 2 - 1px));
++  background: radial-gradient(ellipse at 50% 40%, #6e5034, #3d2a1a);
++}
++
++.crate-lid {
++  position: absolute;
++  width: var(--w);
++  height: var(--d);
++  top: calc((var(--h) - var(--d)) / 2);
++  transform: rotateX(90deg) translateZ(calc(var(--h) / 2));
++  transform-style: preserve-3d;
++}
++
++.crate-flap {
++  position: absolute;
++  left: 0;
++  width: var(--w);
++  height: calc(var(--d) / 2);
++  background-color: var(--kraft-light);
++  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(0, 0, 0, 0.04));
++  box-shadow: inset 0 0 0 1px rgba(110, 75, 40, 0.16);
++  transition: transform 0.55s cubic-bezier(0.34, 1.45, 0.55, 1);
++}
++.crate-flap-back {
++  top: 0;
++  transform-origin: 50% 0;
++}
++.crate-flap-front {
++  bottom: 0;
++  transform-origin: 50% 100%;
++}
++/* Tape across the seam */
++.crate-flap-back::after,
++.crate-flap-front::after {
++  content: "";
++  position: absolute;
++  left: 50%;
++  width: 26%;
++  height: 34%;
++  transform: translateX(-50%);
++  background: var(--tape);
++}
++.crate-flap-back::after {
++  bottom: 0;
++}
++.crate-flap-front::after {
++  top: 0;
++}
++
++.crate[data-open="true"] .crate-flap-back {
++  transform: rotateX(-125deg);
++  transition-delay: 0.05s;
++}
++.crate[data-open="true"] .crate-flap-front {
++  transform: rotateX(125deg);
++}
++
++.crate-label {
++  position: absolute;
++  left: 12%;
++  right: 12%;
++  bottom: 14%;
++  padding: 7px 9px 6px;
++  background: var(--paper);
++  border-radius: 3px;
++  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.08);
++  color: var(--ink);
++  line-height: 1.1;
++}
++.crate-label::before {
++  content: "";
++  position: absolute;
++  inset: 3px;
++  border: 1px dashed rgba(67, 48, 46, 0.22);
++  border-radius: 2px;
++  pointer-events: none;
++}
++
++.crate-hit {
++  position: relative;
++  display: inline-block;
++  background: none;
++  border: 0;
++  padding: 0;
++  color: inherit;
++  text-align: left;
++  -webkit-tap-highlight-color: transparent;
++}
++.crate-hit:hover .crate:not([data-open="true"]) {
++  transform: rotateX(-14deg) rotateY(-28deg) translateY(-6px) rotateZ(-1.5deg);
++}
++.crate-hit:active .crate {
++  transform: rotateX(-14deg) rotateY(-28deg) scale(0.97);
++}
++
++.crate-shadow {
++  position: absolute;
++  left: 8%;
++  right: -4%;
++  bottom: -10px;
++  height: 18px;
++  background: radial-gradient(ellipse at center, rgba(67, 48, 46, 0.28), transparent 70%);
++  filter: blur(2px);
++  pointer-events: none;
++}
++
++@keyframes crate-wobble {
++  0%,
++  100% {
++    transform: rotate(0deg);
++  }
++  50% {
++    transform: rotate(var(--wobble, 1.2deg));
++  }
++}
++.wobble {
++  animation: crate-wobble 5.5s ease-in-out infinite;
++  transform-origin: 50% 100%;
++}
++
++/* ---------- Étagère ---------- */
++
++.shelf-plank {
++  height: 18px;
++  border-radius: 3px;
++  background: linear-gradient(180deg, var(--oak-light) 0%, var(--oak) 55%, #6f5137 100%);
++  box-shadow: 0 14px 22px -10px rgba(67, 48, 46, 0.45);
++}
++.shelf-plank::after {
++  content: "";
++  position: absolute;
++  inset: 0 0 auto;
++  height: 4px;
++  border-radius: 3px 3px 0 0;
++  background: rgba(255, 255, 255, 0.18);
++}
++
++/* ---------- Pieuvre ---------- */
++
++@keyframes tentacle-sway {
++  0%,
++  100% {
++    transform: rotate(-4deg);
++  }
++  50% {
++    transform: rotate(5deg);
++  }
++}
++.tentacle {
++  transform-box: fill-box;
++  animation: tentacle-sway 3.6s ease-in-out infinite;
++}
++@keyframes octo-bob {
++  0%,
++  100% {
++    transform: translateY(0);
++  }
++  50% {
++    transform: translateY(-6px);
++  }
++}
++.octo-bob {
++  animation: octo-bob 4s ease-in-out infinite;
++}
++@keyframes octo-blink {
++  0%,
++  92%,
++  100% {
++    transform: scaleY(1);
++  }
++  95% {
++    transform: scaleY(0.1);
++  }
++}
++.octo-eye {
++  transform-box: fill-box;
++  transform-origin: center;
++  animation: octo-blink 5s infinite;
++}
++
++/* ---------- Petits éléments ---------- */
++
++.sf-btn {
++  display: inline-flex;
++  align-items: center;
++  justify-content: center;
++  gap: 0.5rem;
++  border-radius: 999px;
++  padding: 0.8rem 1.4rem;
++  font-weight: 600;
++  font-size: 0.95rem;
++  transition:
++    transform 0.25s cubic-bezier(0.16, 1, 0.3, 1),
++    background 0.2s ease,
++    box-shadow 0.25s ease;
++}
++.sf-btn-ink {
++  background: var(--ink);
++  color: var(--butter);
++  box-shadow: 0 10px 24px -12px rgba(67, 48, 46, 0.7);
++}
++.sf-btn-ink:hover {
++  transform: translateY(-2px);
++  background: #563e3b;
++}
++.sf-btn-line {
++  border: 1.5px solid var(--ink);
++  color: var(--ink);
++}
++.sf-btn-line:hover {
++  background: rgba(67, 48, 46, 0.06);
++}
++
++.sf-chip {
++  display: inline-flex;
++  align-items: center;
++  gap: 0.4rem;
++  border-radius: 999px;
++  padding: 0.45rem 0.85rem;
++  font-size: 0.85rem;
++  font-weight: 500;
++  border: 1px solid rgba(67, 48, 46, 0.18);
++  background: rgba(255, 253, 246, 0.7);
++  transition: background 0.2s ease, border-color 0.2s ease;
++}
++.sf-chip[data-on="true"] {
++  background: var(--ink);
++  color: var(--butter);
++  border-color: var(--ink);
++}
++
++.sf-field {
++  background: var(--paper);
++  border: 1.5px solid rgba(67, 48, 46, 0.16);
++  border-radius: 999px;
++  transition: border-color 0.2s ease, box-shadow 0.2s ease;
++}
++.sf-field:focus-within {
++  border-color: var(--ink);
++  box-shadow: 0 0 0 4px rgba(67, 48, 46, 0.08);
++}
++
++.grain {
++  position: absolute;
++  inset: 0;
++  pointer-events: none;
++  opacity: 0.35;
++  mix-blend-mode: multiply;
++  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.26 0 0 0 0 0.19 0 0 0 0 0.18 0 0 0 0.09 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
++}
++
++@media (prefers-reduced-motion: reduce) {
++  .wobble,
++  .tentacle,
++  .octo-bob,
++  .octo-eye {
++    animation: none;
++  }
++  .crate,
++  .crate-flap {
++    transition-duration: 0.01s;
++  }
++}
+diff --git a/src/app/inventaire/page.tsx b/src/app/inventaire/page.tsx
+new file mode 100644
+index 0000000..5da03df
+--- /dev/null
++++ b/src/app/inventaire/page.tsx
+@@ -0,0 +1,272 @@
++"use client"
++
++import { AnimatePresence, motion } from "framer-motion"
++import { Check, Plus } from "lucide-react"
++import { useMemo, useState } from "react"
++import { toast } from "sonner"
++import { cn } from "@/components/ui"
++import { Crate } from "@/components/etagere/crate"
++import { Octopus } from "@/components/etagere/octopus"
++import { SiteNav } from "@/components/etagere/site-nav"
++import { DEMO_TASKS, STOCK_BOXES, marketplaceName, type StockBox, type StockItem } from "@/lib/demo-data"
++
++const SLOT_W = 200
++const ROW_H = 190
++const PER_ROW = 3
++
++const STATUS_STYLE: Record<StockItem["status"], string> = {
++  "en ligne": "bg-[var(--sky)]",
++  réservé: "bg-[var(--butter)]",
++  vendu: "bg-[rgba(67,48,46,0.1)] text-[var(--ink-soft)]",
++  "à publier": "bg-[#f3d6c8]",
++}
++
++function BoxPanel({ box, onPublish }: { box: StockBox; onPublish: (item: StockItem) => void }) {
++  const live = box.items.filter((i) => i.status === "en ligne").length
++  return (
++    <motion.div
++      key={box.id}
++      initial={{ opacity: 0, y: 16 }}
++      animate={{ opacity: 1, y: 0 }}
++      exit={{ opacity: 0, y: -8 }}
++      transition={{ type: "spring", stiffness: 260, damping: 24 }}
++      className="rounded-[1.6rem] bg-[var(--paper)] p-6 shadow-[0_24px_50px_-34px_rgba(67,48,46,0.7)] sm:p-7"
++    >
++      <p className="text-[0.88rem] text-[var(--ink-soft)]">{box.hint}</p>
++      <h2 className="serif mt-1 text-[1.9rem] leading-tight">{box.name}</h2>
++      <p className="mt-1 text-[0.92rem] text-[var(--ink-soft)]">
++        {box.items.length} article{box.items.length > 1 ? "s" : ""}, {live} en ligne
++      </p>
++      <ul className="mt-5 divide-y divide-[rgba(67,48,46,0.1)]">
++        {box.items.map((item, i) => (
++          <motion.li
++            key={item.id}
++            initial={{ opacity: 0, x: -10 }}
++            animate={{ opacity: 1, x: 0 }}
++            transition={{ delay: 0.08 * i }}
++            className="flex flex-wrap items-center gap-x-4 gap-y-2 py-4"
++          >
++            <div className="min-w-0 flex-1">
++              <p className="font-semibold leading-snug">{item.title}</p>
++              <p className="mt-0.5 text-[0.85rem] text-[var(--ink-soft)]">
++                {item.on.length ? item.on.map(marketplaceName).join(" et ") : "Pas encore en ligne"}
++                {item.views ? `, ${item.views} vues` : ""}
++              </p>
++            </div>
++            <span className="serif text-[1.2rem]">{item.price} €</span>
++            {item.status === "à publier" ? (
++              <button type="button" onClick={() => onPublish(item)} className="sf-btn sf-btn-ink !px-4 !py-1.5 !text-[0.82rem]">
++                Publier
++              </button>
++            ) : (
++              <span className={cn("rounded-full px-3 py-1 text-[0.8rem]", STATUS_STYLE[item.status])}>{item.status}</span>
++            )}
++          </motion.li>
++        ))}
++      </ul>
++    </motion.div>
++  )
++}
++
++export default function InventairePage() {
++  const [boxes, setBoxes] = useState(STOCK_BOXES)
++  const [openId, setOpenId] = useState<string | null>(null)
++  const [automated, setAutomated] = useState<string[]>([])
++
++  const stats = useMemo(() => {
++    const all = boxes.flatMap((b) => b.items)
++    return {
++      total: all.length,
++      online: all.filter((i) => i.status === "en ligne").length,
++      todo: all.filter((i) => i.status === "à publier").length,
++      value: all.filter((i) => i.status !== "vendu").reduce((s, i) => s + i.price, 0),
++    }
++  }, [boxes])
++
++  const openIndex = boxes.findIndex((b) => b.id === openId)
++  const openBox = openIndex >= 0 ? boxes[openIndex] : null
++  const octo =
++    openIndex >= 0
++      ? { x: (openIndex % PER_ROW) * SLOT_W - 6, y: Math.floor(openIndex / PER_ROW) * ROW_H + 30 }
++      : { x: PER_ROW * SLOT_W - 70, y: -8 }
++
++  function publish(item: StockItem) {
++    setBoxes((bs) =>
++      bs.map((b) => ({
++        ...b,
++        items: b.items.map((i) => (i.id === item.id ? { ...i, status: "en ligne", on: ["vinted", "leboncoin"] } : i)),
++      }))
++    )
++    toast(`« ${item.title} » publié sur Vinted et Leboncoin`)
++  }
++
++  function addBox() {
++    const id = `b${Date.now()}`
++    setBoxes((bs) => [...bs, { id, name: "Nouvelle boîte", hint: "À ranger", items: [] }])
++    setOpenId(id)
++  }
++
++  return (
++    <div className="sf bg-[var(--butter-soft)]">
++      <SiteNav tone="butter" />
++
++      <section className="mx-auto max-w-[1240px] px-4 pb-6 pt-4 sm:px-8">
++        <div className="flex flex-wrap items-end justify-between gap-6">
++          <div>
++            <h1 className="serif text-[clamp(2.2rem,5vw,3.8rem)] leading-[1.05]">Mon inventaire</h1>
++            <p className="mt-3 max-w-[34rem] text-[1.02rem] leading-relaxed text-[var(--ink-soft)]">
++              {stats.total} articles rangés dans {boxes.length} boîtes : {stats.online} en ligne, {stats.todo} à publier,{" "}
++              {stats.value} € de stock à vendre. Ouvrez une boîte pour voir ce qu&apos;elle contient.
++            </p>
++          </div>
++          <button type="button" onClick={addBox} className="sf-btn sf-btn-line">
++            <Plus className="h-4 w-4" />
++            Ajouter une boîte
++          </button>
++        </div>
++      </section>
++
++      <section className="mx-auto grid max-w-[1240px] gap-8 px-4 pb-20 pt-6 sm:px-8 lg:grid-cols-[640px_1fr]">
++        <div className="overflow-hidden">
++          <div
++            className="w-[600px] origin-top-left scale-[0.55] -mb-[207px] min-[480px]:scale-[0.72] min-[480px]:-mb-[129px] sm:mx-auto sm:mb-0 sm:scale-100"
++          >
++            <div className="relative pt-20">
++              <motion.div
++                className="absolute left-0 top-0 z-30"
++                animate={{ x: octo.x, y: octo.y }}
++                transition={{ type: "spring", stiffness: 140, damping: 16 }}
++              >
++                <Octopus size={96} wave={!!openBox} />
++              </motion.div>
++              {Array.from({ length: Math.ceil(boxes.length / PER_ROW) }).map((_, row) => (
++                <div key={row} className="relative" style={{ height: ROW_H }}>
++                  <div className="absolute inset-x-0 bottom-[44px] flex">
++                    {boxes.slice(row * PER_ROW, row * PER_ROW + PER_ROW).map((b) => (
++                      <div key={b.id} className="relative flex justify-center" style={{ width: SLOT_W }}>
++                        <Crate
++                          width={160}
++                          height={112}
++                          depth={100}
++                          open={openId === b.id}
++                          onClick={() => setOpenId(openId === b.id ? null : b.id)}
++                          ariaLabel={`${openId === b.id ? "Fermer" : "Ouvrir"} la boîte ${b.name}`}
++                          label={
++                            <>
++                              <span className={cn("serif block truncate", b.name.length > 11 ? "text-[0.78rem]" : "text-[0.95rem]")}>{b.name}</span>
++                              <span className="block truncate text-[0.66rem] text-[var(--ink-soft)]">
++                                {b.items.length} article{b.items.length > 1 ? "s" : ""}, {b.hint.toLowerCase()}
++                              </span>
++                            </>
++                          }
++                          contents={
++                            <span className="flex gap-1">
++                              {b.items.slice(0, 3).map((i, k) => (
++                                <span
++                                  key={i.id}
++                                  className="block w-[64px] rounded-md bg-[var(--paper)] px-1.5 py-1 text-center text-[0.62rem] leading-tight shadow-md"
++                                  style={{ transform: `rotate(${(k - 1) * 8}deg) translateY(${k === 1 ? -8 : 0}px)` }}
++                                >
++                                  {i.title.split(" ").slice(0, 2).join(" ")}
++                                </span>
++                              ))}
++                            </span>
++                          }
++                        />
++                      </div>
++                    ))}
++                  </div>
++                  <div className="shelf-plank absolute inset-x-0 bottom-4" />
++                </div>
++              ))}
++            </div>
++          </div>
++        </div>
++
++        <div className="lg:sticky lg:top-6 lg:self-start">
++          <AnimatePresence mode="wait">
++            {openBox ? (
++              openBox.items.length ? (
++                <BoxPanel key={openBox.id} box={openBox} onPublish={publish} />
++              ) : (
++                <motion.div
++                  key={openBox.id}
++                  initial={{ opacity: 0, y: 16 }}
++                  animate={{ opacity: 1, y: 0 }}
++                  exit={{ opacity: 0 }}
++                  className="rounded-[1.6rem] bg-[var(--paper)] p-7"
++                >
++                  <h2 className="serif text-[1.9rem]">{openBox.name}</h2>
++                  <p className="mt-2 text-[var(--ink-soft)]">
++                    Cette boîte est vide. Prenez un article en photo depuis l&apos;extension Chrome ou le tableau de bord pour la
++                    remplir.
++                  </p>
++                </motion.div>
++              )
++            ) : (
++              <motion.div
++                key="empty"
++                initial={{ opacity: 0 }}
++                animate={{ opacity: 1 }}
++                exit={{ opacity: 0 }}
++                className="rounded-[1.6rem] border-[1.5px] border-dashed border-[rgba(67,48,46,0.25)] p-7"
++              >
++                <h2 className="serif text-[1.6rem]">Choisissez une boîte</h2>
++                <p className="mt-2 max-w-[26rem] text-[var(--ink-soft)]">
++                  Chaque boîte correspond à un coin de chez vous. Cliquez dessus : Poulpe l&apos;ouvre et sort la liste des
++                  articles, avec leur statut sur chaque site.
++                </p>
++              </motion.div>
++            )}
++          </AnimatePresence>
++        </div>
++      </section>
++
++      <section className="bg-[var(--ink)] text-[var(--butter)]">
++        <div className="mx-auto max-w-[1240px] px-4 py-16 sm:px-8 lg:py-20">
++          <div className="flex flex-wrap items-end justify-between gap-4">
++            <h2 className="serif max-w-[36rem] text-[clamp(1.8rem,3.6vw,2.6rem)] leading-[1.1]">
++              Ce que screenpipe a remarqué cette semaine
++            </h2>
++            <p className="max-w-[24rem] text-[0.92rem] text-[#C9B9A0]">
++              Des gestes que vous répétez à l&apos;écran. Activez une automatisation et Poulpe s&apos;en charge.
++            </p>
++          </div>
++          <ul className="mt-10 grid gap-4 md:grid-cols-3">
++            {DEMO_TASKS.map((t) => {
++              const on = automated.includes(t.id)
++              return (
++                <li key={t.id} className="flex flex-col rounded-[1.4rem] bg-[rgba(255,241,181,0.07)] p-6">
++                  <p className="serif text-[2rem] leading-none">{t.count.split(" ")[0]}×</p>
++                  <p className="mt-1 text-[0.85rem] text-[#C9B9A0]">{t.count.split(" ").slice(1).join(" ")}</p>
++                  <p className="mt-4 leading-snug">{t.what}.</p>
++                  <p className="mt-3 text-[0.92rem] text-[#E9DDC4]">Proposition : {t.proposal.toLowerCase()}.</p>
++                  <button
++                    type="button"
++                    onClick={() => {
++                      setAutomated(on ? automated.filter((x) => x !== t.id) : [...automated, t.id])
++                      toast(on ? "Automatisation désactivée" : "Automatisation activée")
++                    }}
++                    className={cn(
++                      "sf-btn mt-6 self-start !py-2 !text-[0.88rem]",
++                      on ? "bg-[var(--butter)] text-[var(--ink)]" : "border-[1.5px] border-[var(--butter)]"
++                    )}
++                    aria-pressed={on}
++                  >
++                    {on ? (
++                      <>
++                        <Check className="h-4 w-4" /> Automatisation activée
++                      </>
++                    ) : (
++                      "Activer l'automatisation"
++                    )}
++                  </button>
++                </li>
++              )
++            })}
++          </ul>
++        </div>
++      </section>
++    </div>
++  )
++}
+diff --git a/src/app/layout.tsx b/src/app/layout.tsx
+index 100d998..4c5cecb 100644
+--- a/src/app/layout.tsx
++++ b/src/app/layout.tsx
+@@ -1,9 +1,23 @@
+ import { ClerkProvider } from "@clerk/nextjs"
+ import { frFR } from "@clerk/localizations"
+ import type { Metadata, Viewport } from "next"
+-import { JetBrains_Mono, Plus_Jakarta_Sans } from "next/font/google"
++import { Instrument_Sans, JetBrains_Mono, Plus_Jakarta_Sans, Young_Serif } from "next/font/google"
+ import { Toaster } from "sonner"
+ import "./globals.css"
++import "./etagere.css"
++
++const youngSerif = Young_Serif({
++  variable: "--font-young-serif",
++  subsets: ["latin"],
++  display: "swap",
++  weight: "400",
++})
++
++const instrument = Instrument_Sans({
++  variable: "--font-instrument",
++  subsets: ["latin"],
++  display: "swap",
++})
+ 
+ const jakarta = Plus_Jakarta_Sans({
+   variable: "--font-jakarta",
+@@ -20,13 +34,13 @@ const jetbrainsMono = JetBrains_Mono({
+ })
+ 
+ export const metadata: Metadata = {
+-  title: "Stockflow — hackathon POV",
+-  description: "Chat, boutiques, stock partagé et workflows marketplace. Front POV sans backend.",
++  title: "Stockflow",
++  description: "Cherchez un article sur tous les sites à la fois et rangez votre stock de vendeur sur une seule étagère.",
+   robots: { index: false, follow: false },
+ }
+ 
+ export const viewport: Viewport = {
+-  themeColor: "#2563eb",
++  themeColor: "#C1DBE8",
+   width: "device-width",
+   initialScale: 1,
+   viewportFit: "cover",
+@@ -35,7 +49,7 @@ export const viewport: Viewport = {
+ export default function RootLayout({ children }: { children: React.ReactNode }) {
+   return (
+     <ClerkProvider localization={frFR}>
+-      <html lang="fr" className={`${jakarta.variable} ${jetbrainsMono.variable}`}>
++      <html lang="fr" className={`${jakarta.variable} ${jetbrainsMono.variable} ${youngSerif.variable} ${instrument.variable}`}>
+         <body className="antialiased">
+           {children}
+           <Toaster richColors position="top-center" />
+diff --git a/src/app/page.tsx b/src/app/page.tsx
+index 7c9fd3c..c10ed8b 100644
+--- a/src/app/page.tsx
++++ b/src/app/page.tsx
+@@ -1,41 +1,186 @@
++"use client"
++
++import { motion } from "framer-motion"
+ import Link from "next/link"
+-import { Button } from "@/components/ui"
++import { useState } from "react"
++import { Crate } from "@/components/etagere/crate"
++import { Octopus } from "@/components/etagere/octopus"
++import { SiteNav } from "@/components/etagere/site-nav"
++import { DEMO_MEMORIES, MARKETPLACES } from "@/lib/demo-data"
++
++// Pile de cartons : bas (3), milieu (3), haut (2). x/y en px depuis le bas-gauche de la pile.
++const STACK = [
++  { x: 0, y: 0, r: -1 },
++  { x: 165, y: 0, r: 0.5 },
++  { x: 330, y: 0, r: 1 },
++  { x: 25, y: 122, r: 2.2 },
++  { x: 188, y: 120, r: -1.5 },
++  { x: 345, y: 124, r: 3 },
++  { x: 92, y: 242, r: -3 },
++  { x: 262, y: 246, r: 4 },
++]
++
++function HeroStack() {
++  const [open, setOpen] = useState<string | null>(null)
++  return (
++    <div className="relative h-[480px] w-[500px]">
++      <div className="absolute left-[150px] bottom-[300px] z-0">
++        <Octopus size={200} />
++      </div>
++      {MARKETPLACES.map((m, i) => {
++        const p = STACK[i]
++        return (
++          <motion.div
++            key={m.id}
++            className="absolute"
++            style={{ left: p.x, bottom: p.y, zIndex: 10 + (STACK.length - i) }}
++            initial={{ y: -420, opacity: 0, rotate: p.r * 4 }}
++            animate={{ y: 0, opacity: 1, rotate: p.r }}
++            transition={{ delay: 0.25 + i * 0.11, type: "spring", stiffness: 260, damping: 18 }}
++          >
++            <Crate
++              width={150}
++              height={110}
++              depth={100}
++              wobble={i > 2 ? (i % 2 ? 1.4 : -1.2) : undefined}
++              open={open === m.id}
++              onClick={() => setOpen(open === m.id ? null : m.id)}
++              ariaLabel={`Ouvrir la boîte ${m.name}`}
++              label={
++                <>
++                  <span className={`serif block truncate ${m.name.length > 11 ? "text-[0.76rem]" : "text-[0.95rem]"}`}>{m.name}</span>
++                  <span className="block truncate text-[0.68rem] text-[var(--ink-soft)]">{m.kind}</span>
++                </>
++              }
++              contents={
++                <span className="block w-[190px] rounded-2xl bg-[var(--paper)] px-4 py-3 text-[0.82rem] leading-snug shadow-[0_18px_40px_-18px_rgba(67,48,46,0.6)]">
++                  Poulpe fouille <b>{m.name}</b> pour vous à chaque recherche.
++                </span>
++              }
++            />
++          </motion.div>
++        )
++      })}
++    </div>
++  )
++}
+ 
+ export default function HomePage() {
+   return (
+-    <div className="min-h-dvh flex flex-col">
+-      <header className="max-w-5xl mx-auto w-full px-4 py-5 flex items-center justify-between">
+-        <p className="font-bold text-lg tracking-tight">Stockflow</p>
+-        <div className="flex gap-2">
+-          <Link href="/sign-in">
+-            <Button variant="secondary" size="sm">
+-              Se connecter
+-            </Button>
+-          </Link>
+-          <Link href="/sign-up">
+-            <Button size="sm">Créer un compte</Button>
+-          </Link>
++    <div className="sf bg-[var(--paper)]">
++      <SiteNav tone="sky" />
++
++      <section className="relative overflow-hidden bg-[var(--sky)]">
++        <div className="grain" />
++        <div className="relative mx-auto grid max-w-[1240px] items-end gap-6 px-4 pb-16 pt-6 sm:px-8 lg:grid-cols-[1fr_auto] lg:pb-24 lg:pt-10">
++          <div className="max-w-[34rem] pb-2 lg:pb-10">
++            <h1 className="serif text-[clamp(2.6rem,6.2vw,5rem)] leading-[1.02]">Huit bras pour porter toutes vos boîtes.</h1>
++            <p className="mt-6 max-w-[30rem] text-[1.08rem] leading-relaxed text-[var(--ink-soft)]">
++              Vous cherchez des escarpins vus sur Instagram ? Poulpe les cherche sur Vinted, Vestiaire Collective, Zalando et
++              cinq autres sites en même temps. Vous vendez ? Il range votre stock sur une seule étagère.
++            </p>
++            <div className="mt-8 flex flex-wrap gap-3">
++              <Link href="/chercher" className="sf-btn sf-btn-ink">
++                Chercher un article
++              </Link>
++              <Link href="/inventaire" className="sf-btn sf-btn-line">
++                Ranger mon stock
++              </Link>
++            </div>
++            <p className="mt-8 text-[0.9rem] text-[var(--ink-soft)]">Cliquez sur une boîte pour l&apos;ouvrir.</p>
++          </div>
++          <div className="flex min-w-0 justify-center overflow-hidden pt-4 lg:overflow-visible lg:pt-0">
++            <div className="h-[300px] shrink-0 sm:h-[384px] lg:h-auto">
++              <div className="origin-top scale-[0.62] sm:scale-[0.8] lg:scale-100">
++                <HeroStack />
++              </div>
++            </div>
++          </div>
+         </div>
+-      </header>
+-      <main className="flex-1 flex items-center">
+-        <div className="max-w-5xl mx-auto px-4 py-16 w-full">
+-          <p className="text-label mb-3">Hackathon POV · même Clerk que Comie</p>
+-          <h1 className="text-4xl sm:text-5xl font-extrabold tracking-tight max-w-2xl leading-[1.1]">
+-            Chat agent, boutiques, stock d&apos;équipe et workflows marketplace.
+-          </h1>
+-          <p className="text-body-muted mt-4 max-w-xl">
+-            Front-only pour la démo. Backend sur un autre VPS plus tard. Login Clerk partagé avec Comie.
+-          </p>
+-          <div className="flex flex-wrap gap-3 mt-8">
+-            <Link href="/sign-up">
+-              <Button>Lancer la POV</Button>
++      </section>
++
++      <section className="bg-[var(--paper)]">
++        <div className="mx-auto max-w-[1240px] px-4 py-20 sm:px-8 lg:py-28">
++          <h2 className="serif max-w-[40rem] text-[clamp(2rem,4vw,3rem)] leading-[1.08]">Deux étagères dans la même maison.</h2>
++          <div className="mt-12 grid gap-6 md:grid-cols-2">
++            <Link
++              href="/chercher"
++              className="group relative overflow-hidden rounded-[2rem] bg-[var(--sky-soft)] p-8 transition-transform duration-300 hover:-translate-y-1 sm:p-10"
++            >
++              <p className="text-[0.95rem] text-[var(--ink-soft)]">Pour acheter</p>
++              <h3 className="serif mt-2 text-[2rem] leading-tight">Je cherche un article</h3>
++              <p className="mt-4 max-w-[26rem] leading-relaxed text-[var(--ink-soft)]">
++                Tapez un modèle ou déposez une photo, choisissez matière, couleur et budget. Poulpe ouvre les boîtes des huit
++                sites et vous ramène tout : neuf, occasion, ou avec un petit défaut à prix cassé.
++              </p>
++              <span className="mt-8 inline-block font-semibold underline decoration-[1.5px] underline-offset-4">Ouvrir la recherche</span>
++              <div className="pointer-events-none absolute -bottom-6 -right-4 hidden sm:block">
++                <Crate width={120} height={90} depth={90} open label={<span className="serif text-sm">Vinted</span>} showShadow={false} />
++              </div>
+             </Link>
+-            <Link href="/sign-in">
+-              <Button variant="secondary">J&apos;ai déjà un compte</Button>
++            <Link
++              href="/inventaire"
++              className="group relative overflow-hidden rounded-[2rem] bg-[var(--butter-soft)] p-8 transition-transform duration-300 hover:-translate-y-1 sm:p-10"
++            >
++              <p className="text-[0.95rem] text-[var(--ink-soft)]">Pour vendre</p>
++              <h3 className="serif mt-2 text-[2rem] leading-tight">Je range mon stock</h3>
++              <p className="mt-4 max-w-[26rem] leading-relaxed text-[var(--ink-soft)]">
++                Chaque boîte de votre étagère est un coin de chez vous : chaussures, vestes, déco. Ouvrez-la pour voir ce qui
++                est en ligne, réservé, vendu ou encore à publier.
++              </p>
++              <span className="mt-8 inline-block font-semibold underline decoration-[1.5px] underline-offset-4">Voir mon inventaire</span>
++              <div className="pointer-events-none absolute -bottom-6 -right-4 hidden sm:block">
++                <Crate width={120} height={90} depth={90} label={<span className="serif text-sm">Vestes</span>} showShadow={false} />
++              </div>
+             </Link>
+           </div>
+         </div>
+-      </main>
++      </section>
++
++      <section className="relative overflow-hidden bg-[var(--ink)] text-[var(--butter)]">
++        <div className="mx-auto grid max-w-[1240px] gap-14 px-4 py-20 sm:px-8 lg:grid-cols-[1fr_1.1fr] lg:py-28">
++          <div>
++            <h2 className="serif text-[clamp(2rem,4vw,3rem)] leading-[1.08]">Il se souvient de ce que vous avez vu.</h2>
++            <p className="mt-6 max-w-[30rem] leading-relaxed text-[#E9DDC4]">
++              Stockflow se branche sur screenpipe, qui garde en mémoire, sur votre ordinateur, ce qui passe à l&apos;écran. Les
++              escarpins aperçus hier soir dans une story deviennent une recherche en un clic. Les gestes que vous répétez en
++              tant que vendeur deviennent une automatisation.
++            </p>
++            <p className="mt-4 max-w-[30rem] text-[0.92rem] leading-relaxed text-[#C9B9A0]">
++              Rien ne part sur nos serveurs : la page lit screenpipe directement sur votre machine.
++            </p>
++          </div>
++          <ol className="relative space-y-4 border-l border-[rgba(255,241,181,0.25)] pl-6">
++            {DEMO_MEMORIES.slice(0, 3).map((m) => (
++              <li key={m.id} className="relative">
++                <span className="absolute -left-[31px] top-5 h-2.5 w-2.5 rounded-full bg-[var(--butter)]" />
++                <Link
++                  href={`/chercher?q=${encodeURIComponent(m.query)}`}
++                  className="block rounded-2xl bg-[rgba(255,241,181,0.07)] p-5 transition-colors hover:bg-[rgba(255,241,181,0.13)]"
++                >
++                  <p className="text-[0.85rem] text-[#C9B9A0]">
++                    Vu sur {m.seenOn}, {m.when}
++                  </p>
++                  <p className="serif mt-1 text-[1.3rem]">{m.query}</p>
++                  <p className="mt-1 text-[0.92rem] text-[#E9DDC4]">{m.excerpt}</p>
++                  <p className="mt-3 text-[0.9rem] font-semibold underline decoration-[1.5px] underline-offset-4">Chercher partout</p>
++                </Link>
++              </li>
++            ))}
++          </ol>
++        </div>
++      </section>
++
++      <footer className="bg-[var(--paper)]">
++        <div className="mx-auto flex max-w-[1240px] flex-col items-start justify-between gap-4 px-4 py-10 text-[0.92rem] text-[var(--ink-soft)] sm:flex-row sm:items-center sm:px-8">
++          <p>
++            <span className="serif text-[var(--ink)]">Stockflow</span>, fait à 42 Paris pendant le hackathon screenpipe.
++          </p>
++          <Link href="/dashboard" className="underline underline-offset-4">
++            Tableau de bord vendeur
++          </Link>
++        </div>
++      </footer>
+     </div>
+   )
+ }
+diff --git a/src/components/etagere/crate.tsx b/src/components/etagere/crate.tsx
+new file mode 100644
+index 0000000..72d589b
+--- /dev/null
++++ b/src/components/etagere/crate.tsx
+@@ -0,0 +1,78 @@
++"use client"
++
++import type { CSSProperties, ReactNode } from "react"
++import { cn } from "@/components/ui"
++
++type CrateProps = {
++  open?: boolean
++  width?: number
++  height?: number
++  depth?: number
++  label?: ReactNode
++  /** Rendered above the box, visible when it opens (items popping out). */
++  contents?: ReactNode
++  onClick?: () => void
++  ariaLabel?: string
++  className?: string
++  wobble?: number
++  showShadow?: boolean
++}
++
++export function Crate({
++  open = false,
++  width = 150,
++  height = 110,
++  depth = 110,
++  label,
++  contents,
++  onClick,
++  ariaLabel,
++  className,
++  wobble,
++  showShadow = true,
++}: CrateProps) {
++  const style = { "--w": `${width}px`, "--h": `${height}px`, "--d": `${depth}px` } as CSSProperties
++  const box = (
++    <span className="crate-scene relative inline-block" style={{ width, height }}>
++      {contents ? (
++        <span
++          className={cn(
++            "absolute left-1/2 bottom-[60%] -translate-x-1/2 z-10 pointer-events-none transition-all duration-500",
++            open ? "opacity-100 -translate-y-6" : "opacity-0 translate-y-6"
++          )}
++          style={{ transitionTimingFunction: "cubic-bezier(0.34, 1.5, 0.5, 1)" }}
++          aria-hidden={!open}
++        >
++          {contents}
++        </span>
++      ) : null}
++      <span className="crate block" data-open={open} style={style}>
++        <span className="crate-face crate-back" />
++        <span className="crate-face crate-left" />
++        <span className="crate-hole" />
++        <span className="crate-face crate-right" />
++        <span className="crate-face crate-front">{label ? <span className="crate-label">{label}</span> : null}</span>
++        <span className="crate-lid">
++          <span className="crate-flap crate-flap-back" />
++          <span className="crate-flap crate-flap-front" />
++        </span>
++      </span>
++      {showShadow ? <span className="crate-shadow" /> : null}
++    </span>
++  )
++
++  const wrapped = wobble ? (
++    <span className="wobble inline-block" style={{ "--wobble": `${wobble}deg` } as CSSProperties}>
++      {box}
++    </span>
++  ) : (
++    box
++  )
++
++  if (!onClick) return <span className={cn("inline-block", className)}>{wrapped}</span>
++  return (
++    <button type="button" className={cn("crate-hit", className)} onClick={onClick} aria-label={ariaLabel} aria-pressed={open}>
++      {wrapped}
++    </button>
++  )
++}
+diff --git a/src/components/etagere/octopus.tsx b/src/components/etagere/octopus.tsx
+new file mode 100644
+index 0000000..9e83e1b
+--- /dev/null
++++ b/src/components/etagere/octopus.tsx
+@@ -0,0 +1,68 @@
++"use client"
++
++import { cn } from "@/components/ui"
++
++/** Poulpe, la mascotte : huit bras pour porter toutes les boîtes. */
++export function Octopus({ size = 160, className, wave = false }: { size?: number; className?: string; wave?: boolean }) {
++  const arms = [
++    "M58 112 C 40 130, 30 150, 14 152 C 6 153, 4 146, 10 143",
++    "M66 118 C 56 140, 52 162, 38 172 C 31 177, 25 171, 30 166",
++    "M76 122 C 74 146, 74 168, 64 182 C 59 189, 52 185, 56 179",
++    "M88 124 C 90 148, 94 168, 88 184 C 85 191, 78 189, 80 182",
++    "M100 124 C 106 148, 114 166, 112 182 C 111 190, 104 190, 104 183",
++    "M110 122 C 122 144, 134 160, 138 176 C 140 184, 133 186, 131 180",
++    "M120 118 C 138 134, 152 146, 162 160 C 166 167, 160 171, 156 165",
++    "M126 110 C 146 120, 164 124, 178 136 C 184 141, 179 147, 174 142",
++  ]
++  return (
++    <svg
++      viewBox="0 0 190 200"
++      width={size}
++      height={(size * 200) / 190}
++      className={cn("overflow-visible", className)}
++      role="img"
++      aria-label="Poulpe, la mascotte Stockflow"
++    >
++      <defs>
++        <radialGradient id="octo-body" cx="40%" cy="30%" r="75%">
++          <stop offset="0%" stopColor="#FFF8D8" />
++          <stop offset="60%" stopColor="#FFEBA0" />
++          <stop offset="100%" stopColor="#EED184" />
++        </radialGradient>
++      </defs>
++      <g className="octo-bob">
++        <g fill="none" stroke="url(#octo-body)" strokeWidth="13" strokeLinecap="round">
++          {arms.map((d, i) => (
++            <path
++              key={i}
++              d={d}
++              className="tentacle"
++              style={{
++                transformOrigin: i < 4 ? "100% 0%" : "0% 0%",
++                animationDelay: `${-i * 0.45}s`,
++                animationDuration: wave && i === 7 ? "1.2s" : undefined,
++              }}
++            />
++          ))}
++        </g>
++        <g fill="none" stroke="#E2C27A" strokeWidth="1.2" strokeLinecap="round" opacity="0.7">
++          {arms.map((d, i) => (
++            <path key={i} d={d} className="tentacle" strokeDasharray="1 7" style={{ transformOrigin: i < 4 ? "100% 0%" : "0% 0%", animationDelay: `${-i * 0.45}s` }} />
++          ))}
++        </g>
++        <path
++          d="M95 14 C 140 14, 152 52, 148 80 C 145 104, 128 122, 95 124 C 62 122, 45 104, 42 80 C 38 52, 50 14, 95 14 Z"
++          fill="url(#octo-body)"
++        />
++        <ellipse cx="78" cy="36" rx="16" ry="9" fill="#FFFDF0" opacity="0.6" transform="rotate(-20 78 36)" />
++        <g fill="#43302E">
++          <ellipse className="octo-eye" cx="78" cy="82" rx="5" ry="6.5" />
++          <ellipse className="octo-eye" cx="112" cy="82" rx="5" ry="6.5" />
++        </g>
++        <ellipse cx="66" cy="96" rx="8" ry="4.5" fill="#F4B9A8" opacity="0.55" />
++        <ellipse cx="124" cy="96" rx="8" ry="4.5" fill="#F4B9A8" opacity="0.55" />
++        <path d="M89 96 Q 95 102, 101 96" fill="none" stroke="#43302E" strokeWidth="2.4" strokeLinecap="round" />
++      </g>
++    </svg>
++  )
++}
+diff --git a/src/components/etagere/site-nav.tsx b/src/components/etagere/site-nav.tsx
+new file mode 100644
+index 0000000..6773d26
+--- /dev/null
++++ b/src/components/etagere/site-nav.tsx
+@@ -0,0 +1,47 @@
++"use client"
++
++import Link from "next/link"
++import { usePathname } from "next/navigation"
++import { cn } from "@/components/ui"
++
++const LINKS = [
++  { href: "/chercher", label: "Chercher" },
++  { href: "/inventaire", label: "Mon inventaire" },
++  { href: "/sign-in", label: "Se connecter" },
++]
++
++export function SiteNav({ tone = "sky" }: { tone?: "sky" | "butter" | "paper" }) {
++  const path = usePathname()
++  return (
++    <header
++      className={cn(
++        "relative z-30 w-full",
++        tone === "sky" && "bg-[var(--sky)]",
++        tone === "butter" && "bg-[var(--butter-soft)]",
++        tone === "paper" && "bg-[var(--paper)]"
++      )}
++    >
++      <nav className="mx-auto flex max-w-[1240px] items-center justify-between gap-4 px-4 py-5 sm:px-8">
++        <Link href="/" className="serif text-[1.35rem] leading-none">
++          Stockflow
++        </Link>
++        <p className="hidden text-[0.95rem] text-[var(--ink-soft)] md:block">Toutes les boutiques, une seule étagère</p>
++        <ul className="flex items-center gap-4 text-[0.95rem] sm:gap-7">
++          {LINKS.map((l) => (
++            <li key={l.href} className={cn(l.href === "/sign-in" && "hidden sm:block")}>
++              <Link
++                href={l.href}
++                className={cn(
++                  "underline-offset-4 decoration-[1.5px] hover:underline",
++                  path === l.href && "underline"
++                )}
++              >
++                {l.label}
++              </Link>
++            </li>
++          ))}
++        </ul>
++      </nav>
++    </header>
++  )
++}
+diff --git a/src/lib/demo-data.ts b/src/lib/demo-data.ts
+new file mode 100644
+index 0000000..970891d
+--- /dev/null
++++ b/src/lib/demo-data.ts
+@@ -0,0 +1,224 @@
++// Données de démo pour les pages publiques (accueil, chercher, inventaire).
++// À remplacer par l'API (/backend) quand les connecteurs marketplaces existent.
++
++export type MarketplaceId = "vinted" | "leboncoin" | "vestiaire" | "zalando" | "farfetch" | "amazon" | "ebay" | "depop"
++
++export type Marketplace = {
++  id: MarketplaceId
++  name: string
++  kind: string
++}
++
++export const MARKETPLACES: Marketplace[] = [
++  { id: "vinted", name: "Vinted", kind: "Seconde main" },
++  { id: "leboncoin", name: "Leboncoin", kind: "Petites annonces" },
++  { id: "vestiaire", name: "Vestiaire Collective", kind: "Luxe d'occasion" },
++  { id: "zalando", name: "Zalando", kind: "Neuf et outlet" },
++  { id: "farfetch", name: "Farfetch", kind: "Luxe neuf" },
++  { id: "amazon", name: "Amazon", kind: "Neuf" },
++  { id: "ebay", name: "eBay", kind: "Enchères et occasion" },
++  { id: "depop", name: "Depop", kind: "Vintage" },
++]
++
++export const marketplaceName = (id: MarketplaceId) => MARKETPLACES.find((m) => m.id === id)?.name ?? id
++
++export type Condition = "neuf" | "très bon état" | "bon état" | "avec défaut"
++export type Category = "chaussures" | "sacs" | "vestes" | "montres" | "deco"
++
++export type Offer = {
++  id: string
++  marketplace: MarketplaceId
++  title: string
++  brand: string
++  category: Category
++  price: number
++  retailPrice?: number
++  condition: Condition
++  color: string
++  material: string
++  size?: string
++  note?: string
++  postedDaysAgo: number
++}
++
++let n = 0
++const o = (x: Omit<Offer, "id">): Offer => ({ id: `o${++n}`, ...x })
++
++export const OFFERS: Offer[] = [
++  // Louboutin So Kate : l'exemple de la démo
++  o({ marketplace: "vinted", title: "Louboutin So Kate 120 vernis noir", brand: "Christian Louboutin", category: "chaussures", price: 289, retailPrice: 795, condition: "bon état", color: "noir", material: "cuir verni", size: "38", note: "Semelles rouges usées à 30 %", postedDaysAgo: 2 }),
++  o({ marketplace: "vestiaire", title: "So Kate 120 cuir verni noir", brand: "Christian Louboutin", category: "chaussures", price: 420, retailPrice: 795, condition: "très bon état", color: "noir", material: "cuir verni", size: "38", note: "Authentifié par Vestiaire", postedDaysAgo: 5 }),
++  o({ marketplace: "farfetch", title: "Escarpins So Kate 120 mm", brand: "Christian Louboutin", category: "chaussures", price: 795, retailPrice: 795, condition: "neuf", color: "noir", material: "cuir verni", size: "38", postedDaysAgo: 0 }),
++  o({ marketplace: "zalando", title: "So Kate 120 nude", brand: "Christian Louboutin", category: "chaussures", price: 636, retailPrice: 795, condition: "neuf", color: "nude", material: "cuir", size: "38", note: "Outlet -20 %", postedDaysAgo: 1 }),
++  o({ marketplace: "ebay", title: "Louboutin So Kate noir pointure 38.5", brand: "Christian Louboutin", category: "chaussures", price: 210, retailPrice: 795, condition: "avec défaut", color: "noir", material: "cuir verni", size: "38.5", note: "Petite éraflure au talon gauche", postedDaysAgo: 9 }),
++  o({ marketplace: "leboncoin", title: "Escarpins Louboutin So Kate portés 2 fois", brand: "Christian Louboutin", category: "chaussures", price: 350, retailPrice: 795, condition: "très bon état", color: "noir", material: "cuir verni", size: "38", note: "Remise en main propre, Paris 11e", postedDaysAgo: 3 }),
++  o({ marketplace: "vinted", title: "Louboutin So Kate daim rouge", brand: "Christian Louboutin", category: "chaussures", price: 265, retailPrice: 745, condition: "bon état", color: "rouge", material: "daim", size: "37", postedDaysAgo: 12 }),
++  o({ marketplace: "depop", title: "Vintage Louboutin So Kate patent", brand: "Christian Louboutin", category: "chaussures", price: 240, retailPrice: 795, condition: "bon état", color: "noir", material: "cuir verni", size: "39", note: "Boîte d'origine incluse", postedDaysAgo: 20 }),
++  o({ marketplace: "amazon", title: "Christian Louboutin So Kate 120 Black", brand: "Christian Louboutin", category: "chaussures", price: 812, retailPrice: 795, condition: "neuf", color: "noir", material: "cuir verni", size: "38", postedDaysAgo: 4 }),
++  o({ marketplace: "vestiaire", title: "So Kate 100 cuir nude", brand: "Christian Louboutin", category: "chaussures", price: 380, retailPrice: 745, condition: "très bon état", color: "nude", material: "cuir", size: "38", postedDaysAgo: 7 }),
++
++  // Autres recherches possibles
++  o({ marketplace: "vinted", title: "Sac Le Pliage long champ marine", brand: "Longchamp", category: "sacs", price: 45, retailPrice: 125, condition: "bon état", color: "bleu", material: "nylon", postedDaysAgo: 1 }),
++  o({ marketplace: "zalando", title: "Le Pliage Original M", brand: "Longchamp", category: "sacs", price: 125, retailPrice: 125, condition: "neuf", color: "bleu", material: "nylon", postedDaysAgo: 0 }),
++  o({ marketplace: "vestiaire", title: "Sac Jodie petit modèle", brand: "Bottega Veneta", category: "sacs", price: 1450, retailPrice: 2800, condition: "très bon état", color: "vert", material: "cuir", postedDaysAgo: 6 }),
++  o({ marketplace: "leboncoin", title: "Sac Speedy 30 monogram", brand: "Louis Vuitton", category: "sacs", price: 520, retailPrice: 1450, condition: "avec défaut", color: "marron", material: "toile", note: "Poignées patinées", postedDaysAgo: 15 }),
++  o({ marketplace: "ebay", title: "Speedy 30 monogram avec facture", brand: "Louis Vuitton", category: "sacs", price: 690, retailPrice: 1450, condition: "bon état", color: "marron", material: "toile", postedDaysAgo: 4 }),
++  o({ marketplace: "vinted", title: "Veste en jean Levi's Trucker vintage", brand: "Levi's", category: "vestes", price: 35, retailPrice: 110, condition: "bon état", color: "bleu", material: "denim", size: "M", postedDaysAgo: 2 }),
++  o({ marketplace: "depop", title: "Levi's Trucker 90s délavée", brand: "Levi's", category: "vestes", price: 48, retailPrice: 110, condition: "très bon état", color: "bleu", material: "denim", size: "L", postedDaysAgo: 8 }),
++  o({ marketplace: "amazon", title: "Levi's The Trucker Jacket", brand: "Levi's", category: "vestes", price: 99, retailPrice: 110, condition: "neuf", color: "bleu", material: "denim", size: "M", postedDaysAgo: 0 }),
++  o({ marketplace: "farfetch", title: "Trench Kensington long", brand: "Burberry", category: "vestes", price: 2190, retailPrice: 2190, condition: "neuf", color: "beige", material: "coton", size: "38", postedDaysAgo: 3 }),
++  o({ marketplace: "vestiaire", title: "Trench Burberry Kensington", brand: "Burberry", category: "vestes", price: 890, retailPrice: 2190, condition: "très bon état", color: "beige", material: "coton", size: "38", postedDaysAgo: 11 }),
++  o({ marketplace: "ebay", title: "Montre Seiko 5 automatique", brand: "Seiko", category: "montres", price: 140, retailPrice: 260, condition: "bon état", color: "argent", material: "acier", postedDaysAgo: 5 }),
++  o({ marketplace: "leboncoin", title: "Lampe Panthella Louis Poulsen", brand: "Louis Poulsen", category: "deco", price: 260, retailPrice: 545, condition: "très bon état", color: "blanc", material: "métal", postedDaysAgo: 2 }),
++]
++
++export const COLORS = ["noir", "nude", "rouge", "bleu", "marron", "beige"]
++export const MATERIALS = ["cuir verni", "cuir", "daim", "toile", "nylon", "denim"]
++export const CONDITIONS: Condition[] = ["neuf", "très bon état", "bon état", "avec défaut"]
++
++const norm = (s: string) =>
++  s
++    .toLowerCase()
++    .normalize("NFD")
++    .replace(/[̀-ͯ]/g, "")
++
++export type SearchFilters = {
++  colors: string[]
++  materials: string[]
++  conditions: Condition[]
++  maxPrice?: number
++}
++
++export function searchOffers(query: string, f: SearchFilters): Offer[] {
++  const words = norm(query).split(/\s+/).filter((w) => w.length > 1)
++  return OFFERS.filter((x) => {
++    const hay = norm(`${x.title} ${x.brand} ${x.category} ${x.color} ${x.material}`)
++    if (words.length && !words.every((w) => hay.includes(w))) return false
++    if (f.colors.length && !f.colors.includes(x.color)) return false
++    if (f.materials.length && !f.materials.includes(x.material)) return false
++    if (f.conditions.length && !f.conditions.includes(x.condition)) return false
++    if (f.maxPrice && x.price > f.maxPrice) return false
++    return true
++  }).sort((a, b) => a.price - b.price)
++}
++
++// ---------- Mémoire écran (screenpipe) ----------
++
++export type ScreenMemory = {
++  id: string
++  query: string
++  seenOn: string
++  when: string
++  excerpt: string
++}
++
++export const DEMO_MEMORIES: ScreenMemory[] = [
++  { id: "m1", query: "Louboutin So Kate", seenOn: "Instagram", when: "hier, 21:14", excerpt: "« les So Kate de @lea.prs, je suis amoureuse »" },
++  { id: "m2", query: "Longchamp Le Pliage", seenOn: "TikTok", when: "mardi, 08:52", excerpt: "Vidéo « what's in my bag »" },
++  { id: "m3", query: "Burberry trench Kensington", seenOn: "Safari, vogue.fr", when: "lundi, 13:30", excerpt: "Article « 10 trenchs pour l'automne »" },
++  { id: "m4", query: "Levi's Trucker", seenOn: "Pinterest", when: "dimanche, 18:05", excerpt: "Tableau « Looks d'automne »" },
++]
++
++// ---------- Inventaire vendeur ----------
++
++export type StockItem = {
++  id: string
++  title: string
++  price: number
++  status: "en ligne" | "réservé" | "vendu" | "à publier"
++  on: MarketplaceId[]
++  views: number
++}
++
++export type StockBox = {
++  id: string
++  name: string
++  hint: string
++  items: StockItem[]
++}
++
++export const STOCK_BOXES: StockBox[] = [
++  {
++    id: "b1",
++    name: "Chaussures",
++    hint: "Étagère du haut",
++    items: [
++      { id: "s1", title: "Sneakers blanches 40", price: 28, status: "réservé", on: ["vinted"], views: 90 },
++      { id: "s2", title: "Bottines Chelsea cuir 39", price: 55, status: "en ligne", on: ["vinted", "leboncoin"], views: 41 },
++      { id: "s3", title: "Mocassins vintage 41", price: 32, status: "à publier", on: [], views: 0 },
++    ],
++  },
++  {
++    id: "b2",
++    name: "Vestes",
++    hint: "Penderie de l'entrée",
++    items: [
++      { id: "s4", title: "Veste jean vintage", price: 35, status: "en ligne", on: ["vinted", "leboncoin"], views: 120 },
++      { id: "s5", title: "Pull oversize beige", price: 18, status: "vendu", on: ["vinted"], views: 210 },
++      { id: "s6", title: "Doudoune légère M", price: 40, status: "en ligne", on: ["vinted"], views: 37 },
++    ],
++  },
++  {
++    id: "b3",
++    name: "Sacs",
++    hint: "Sous le lit",
++    items: [
++      { id: "s7", title: "Sac bandoulière cuir", price: 42, status: "en ligne", on: ["vinted"], views: 33 },
++      { id: "s8", title: "Tote bag toile écrue", price: 12, status: "à publier", on: [], views: 0 },
++    ],
++  },
++  {
++    id: "b4",
++    name: "Déco",
++    hint: "Cave, à gauche",
++    items: [
++      { id: "s9", title: "Lampe design scandinave", price: 45, status: "en ligne", on: ["leboncoin"], views: 22 },
++      { id: "s10", title: "Lot déco Halloween", price: 25, status: "réservé", on: ["leboncoin"], views: 15 },
++      { id: "s11", title: "Fauteuil velours vert", price: 120, status: "en ligne", on: ["leboncoin"], views: 41 },
++      { id: "s12", title: "Console TV bois", price: 90, status: "en ligne", on: ["leboncoin"], views: 58 },
++    ],
++  },
++  {
++    id: "b5",
++    name: "Montres et bijoux",
++    hint: "Tiroir du bureau",
++    items: [{ id: "s13", title: "Montre minimaliste", price: 55, status: "en ligne", on: ["vinted"], views: 67 }],
++  },
++  {
++    id: "b6",
++    name: "Halloween",
++    hint: "Grenier",
++    items: [
++      { id: "s14", title: "Masque Halloween LED", price: 12, status: "en ligne", on: ["vinted"], views: 48 },
++      { id: "s15", title: "Masque Halloween LED (x2)", price: 12, status: "à publier", on: [], views: 0 },
++    ],
++  },
++]
++
++export type RepeatedTask = {
++  id: string
++  what: string
++  count: string
++  proposal: string
++}
++
++export const DEMO_TASKS: RepeatedTask[] = [
++  {
++    id: "t1",
++    what: "Vous avez recopié la même annonce de Vinted vers Leboncoin",
++    count: "6 fois cette semaine",
++    proposal: "Publier automatiquement chaque nouvel article sur les deux sites",
++  },
++  {
++    id: "t2",
++    what: "Vous avez répondu « Oui, toujours disponible ! » à des acheteurs",
++    count: "14 fois cette semaine",
++    proposal: "Répondre à votre place tant que l'article est en ligne",
++  },
++  {
++    id: "t3",
++    what: "Vous avez baissé le prix d'annonces sans vue depuis 10 jours",
++    count: "4 fois ce mois-ci",
++    proposal: "Baisser de 10 % les annonces dormantes, avec un plancher que vous fixez",
++  },
++]
+diff --git a/src/lib/screenpipe.ts b/src/lib/screenpipe.ts
+new file mode 100644
+index 0000000..741b2ae
+--- /dev/null
++++ b/src/lib/screenpipe.ts
+@@ -0,0 +1,65 @@
++"use client"
++
++// screenpipe tourne en local sur la machine de l'utilisateur (API sur :3030).
++// Le navigateur l'interroge directement : rien ne quitte l'ordinateur.
++import { DEMO_MEMORIES, type ScreenMemory } from "@/lib/demo-data"
++
++const SCREENPIPE_URL = (process.env.NEXT_PUBLIC_SCREENPIPE_URL || "http://localhost:3030").replace(/\/$/, "")
++
++const WATCHED = ["Louboutin", "Longchamp", "Burberry", "Levi's", "Bottega", "Vuitton", "Seiko"]
++
++type SearchHit = {
++  type: string
++  content: { text?: string; transcription?: string; timestamp?: string; app_name?: string; window_name?: string }
++}
++
++async function get<T>(path: string, ms = 1500): Promise<T> {
++  const ctrl = new AbortController()
++  const t = setTimeout(() => ctrl.abort(), ms)
++  try {
++    const res = await fetch(`${SCREENPIPE_URL}${path}`, { signal: ctrl.signal })
++    if (!res.ok) throw new Error(`screenpipe ${res.status}`)
++    return (await res.json()) as T
++  } finally {
++    clearTimeout(t)
++  }
++}
++
++const when = (iso?: string) =>
++  iso
++    ? new Date(iso).toLocaleString("fr-FR", { weekday: "long", hour: "2-digit", minute: "2-digit" })
++    : "récemment"
++
++/** Produits repérés à l'écran. Retombe sur des données de démo si screenpipe ne répond pas. */
++export async function loadScreenMemories(): Promise<{ live: boolean; memories: ScreenMemory[] }> {
++  try {
++    await get("/health")
++    const since = new Date(Date.now() - 7 * 86400_000).toISOString()
++    const results = await Promise.all(
++      WATCHED.map((brand) =>
++        get<{ data: SearchHit[] }>(
++          `/search?q=${encodeURIComponent(brand)}&content_type=all&limit=1&start_time=${encodeURIComponent(since)}`,
++          4000
++        )
++          .then((r) => ({ brand, hit: r.data?.[0] }))
++          .catch(() => ({ brand, hit: undefined }))
++      )
++    )
++    const memories = results
++      .filter((r) => r.hit)
++      .map(({ brand, hit }, i) => {
++        const text = (hit!.content.text || hit!.content.transcription || "").replace(/\s+/g, " ")
++        const at = text.toLowerCase().indexOf(brand.toLowerCase())
++        return {
++          id: `live${i}`,
++          query: brand,
++          seenOn: hit!.content.app_name || hit!.content.window_name || "votre écran",
++          when: when(hit!.content.timestamp),
++          excerpt: `« ${text.slice(Math.max(0, at - 30), at + 60).trim()} »`,
++        }
++      })
++    return { live: true, memories }
++  } catch {
++    return { live: false, memories: DEMO_MEMORIES }
++  }
++}
+diff --git a/src/middleware.ts b/src/middleware.ts
+index efd5b46..4195cae 100644
+--- a/src/middleware.ts
++++ b/src/middleware.ts
+@@ -1,13 +1,8 @@
+ import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server"
+-import { NextResponse } from "next/server"
+ 
+-const isPublic = createRouteMatcher(["/", "/sign-in(.*)", "/sign-up(.*)", "/backend(.*)"])
++const isPublic = createRouteMatcher(["/", "/chercher(.*)", "/inventaire(.*)", "/sign-in(.*)", "/sign-up(.*)", "/backend(.*)"])
+ 
+ export default clerkMiddleware(async (auth, req) => {
+-  const { userId } = await auth()
+-  if (userId && req.nextUrl.pathname === "/") {
+-    return NextResponse.redirect(new URL("/dashboard", req.url))
+-  }
+   if (!isPublic(req)) await auth.protect()
+ })
+ 
+-- 
+2.43.0
+
+
+From 2ceb9db15f21e4c3c1a6ef8de9354d652dc265fb Mon Sep 17 00:00:00 2001
+From: Magra Ku <243417575+magraku@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 13:14:33 +0000
+Subject: [PATCH 2/2] Rename the product to Octohandy
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MQ5xVVhbmehyRbhYYH4Zpu
+---
+ src/app/dashboard/page.tsx          | 2 +-
+ src/app/dashboard/shops/page.tsx    | 2 +-
+ src/app/etagere.css                 | 2 +-
+ src/app/layout.tsx                  | 2 +-
+ src/app/page.tsx                    | 4 ++--
+ src/components/dashboard-shell.tsx  | 2 +-
+ src/components/etagere/octopus.tsx  | 2 +-
+ src/components/etagere/site-nav.tsx | 2 +-
+ 8 files changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 8a65703..827e751 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -15,7 +15,7 @@ export default function DashboardHome() {
+     <div>
+       <PageHeader
+         label="Dashboard"
+-        title="POV Stockflow"
++        title="POV Octohandy"
+         subtitle="Front Vercel + API Hetzner. Boutique regroupe boutiques et annonces. Extension pour les cookies."
+       />
+       <div className="grid sm:grid-cols-2 gap-4">
+diff --git a/src/app/dashboard/shops/page.tsx b/src/app/dashboard/shops/page.tsx
+index b5093ce..955095c 100644
+--- a/src/app/dashboard/shops/page.tsx
++++ b/src/app/dashboard/shops/page.tsx
+@@ -68,7 +68,7 @@ export default function ShopsPage() {
+           <EmptyState
+             icon={<Store className="w-6 h-6" />}
+             title="Aucune boutique"
+-            text="Installe l'extension Stockflow pour connecter Vinted / Leboncoin, ou recharge pour les mocks."
++            text="Installe l'extension Octohandy pour connecter Vinted / Leboncoin, ou recharge pour les mocks."
+             action={
+               <Link href="/dashboard/extension">
+                 <Button>
+diff --git a/src/app/etagere.css b/src/app/etagere.css
+index 897db08..2e350b3 100644
+--- a/src/app/etagere.css
++++ b/src/app/etagere.css
+@@ -1,4 +1,4 @@
+-/* Stockflow "étagère" — public pages (accueil, chercher, inventaire). */
++/* Octohandy "étagère" — public pages (accueil, chercher, inventaire). */
+ 
+ .sf {
+   --ink: #43302e;
+diff --git a/src/app/layout.tsx b/src/app/layout.tsx
+index 4c5cecb..560c4f2 100644
+--- a/src/app/layout.tsx
++++ b/src/app/layout.tsx
+@@ -34,7 +34,7 @@ const jetbrainsMono = JetBrains_Mono({
+ })
+ 
+ export const metadata: Metadata = {
+-  title: "Stockflow",
++  title: "Octohandy",
+   description: "Cherchez un article sur tous les sites à la fois et rangez votre stock de vendeur sur une seule étagère.",
+   robots: { index: false, follow: false },
+ }
+diff --git a/src/app/page.tsx b/src/app/page.tsx
+index c10ed8b..25731a9 100644
+--- a/src/app/page.tsx
++++ b/src/app/page.tsx
+@@ -142,7 +142,7 @@ export default function HomePage() {
+           <div>
+             <h2 className="serif text-[clamp(2rem,4vw,3rem)] leading-[1.08]">Il se souvient de ce que vous avez vu.</h2>
+             <p className="mt-6 max-w-[30rem] leading-relaxed text-[#E9DDC4]">
+-              Stockflow se branche sur screenpipe, qui garde en mémoire, sur votre ordinateur, ce qui passe à l&apos;écran. Les
++              Octohandy se branche sur screenpipe, qui garde en mémoire, sur votre ordinateur, ce qui passe à l&apos;écran. Les
+               escarpins aperçus hier soir dans une story deviennent une recherche en un clic. Les gestes que vous répétez en
+               tant que vendeur deviennent une automatisation.
+             </p>
+@@ -174,7 +174,7 @@ export default function HomePage() {
+       <footer className="bg-[var(--paper)]">
+         <div className="mx-auto flex max-w-[1240px] flex-col items-start justify-between gap-4 px-4 py-10 text-[0.92rem] text-[var(--ink-soft)] sm:flex-row sm:items-center sm:px-8">
+           <p>
+-            <span className="serif text-[var(--ink)]">Stockflow</span>, fait à 42 Paris pendant le hackathon screenpipe.
++            <span className="serif text-[var(--ink)]">Octohandy</span>, fait à 42 Paris pendant le hackathon screenpipe.
+           </p>
+           <Link href="/dashboard" className="underline underline-offset-4">
+             Tableau de bord vendeur
+diff --git a/src/components/dashboard-shell.tsx b/src/components/dashboard-shell.tsx
+index fc25449..f9128fb 100644
+--- a/src/components/dashboard-shell.tsx
++++ b/src/components/dashboard-shell.tsx
+@@ -49,7 +49,7 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
+             <Menu className="w-5 h-5" />
+           </button>
+           <Link href="/dashboard" className="font-bold tracking-tight text-lg">
+-            Stockflow
++            Octohandy
+           </Link>
+           <nav className="hidden lg:flex items-center gap-1 ml-4">
+             {nav.map((n) => (
+diff --git a/src/components/etagere/octopus.tsx b/src/components/etagere/octopus.tsx
+index 9e83e1b..9ada5be 100644
+--- a/src/components/etagere/octopus.tsx
++++ b/src/components/etagere/octopus.tsx
+@@ -21,7 +21,7 @@ export function Octopus({ size = 160, className, wave = false }: { size?: number
+       height={(size * 200) / 190}
+       className={cn("overflow-visible", className)}
+       role="img"
+-      aria-label="Poulpe, la mascotte Stockflow"
++      aria-label="Poulpe, la mascotte Octohandy"
+     >
+       <defs>
+         <radialGradient id="octo-body" cx="40%" cy="30%" r="75%">
+diff --git a/src/components/etagere/site-nav.tsx b/src/components/etagere/site-nav.tsx
+index 6773d26..af4ff98 100644
+--- a/src/components/etagere/site-nav.tsx
++++ b/src/components/etagere/site-nav.tsx
+@@ -23,7 +23,7 @@ export function SiteNav({ tone = "sky" }: { tone?: "sky" | "butter" | "paper" })
+     >
+       <nav className="mx-auto flex max-w-[1240px] items-center justify-between gap-4 px-4 py-5 sm:px-8">
+         <Link href="/" className="serif text-[1.35rem] leading-none">
+-          Stockflow
++          Octohandy
+         </Link>
+         <p className="hidden text-[0.95rem] text-[var(--ink-soft)] md:block">Toutes les boutiques, une seule étagère</p>
+         <ul className="flex items-center gap-4 text-[0.95rem] sm:gap-7">
+-- 
+2.43.0
+
